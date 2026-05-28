@@ -2,7 +2,7 @@
 
 set -e
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 IMAGE="docker.kurrent.io/kurrent-latest/dns:$VERSION"
 
 show () {
@@ -23,9 +23,10 @@ want_build=
 want_image=
 want_cross_compile=
 want_publish_prod=
+redhat_only="n"
 
 if [ "$#" -eq 0 ] ; then
-    echo "usage: ./build.sh (build|image|publish-staging|publish-prod)..."
+    echo "usage: ./build.sh (build|image|publish-staging|publish-prod)... [--redhat-only]"
     exit 0
 fi
 
@@ -36,6 +37,7 @@ for arg in "$@" ; do
         image) want_cross_compile=y; want_image=y;;
         publish-staging) want_cross_compile=y; want_publish_staging=y;;
         publish-prod) want_cross_compile=y; want_publish_prod=y;;
+        --redhat-only) redhat_only="y";;
         *) echo "unrecognized target: $arg"; exit 1;;
     esac
 done
@@ -62,42 +64,46 @@ if [ -n "$want_cross_compile" ] ; then
 fi
 
 dynamic_labels () {
-    echo --label release="$(git show-ref HEAD --head -s8)" --label version=$VERSION
+    echo --label release="$(git rev-parse --short=8 HEAD)" --label version=$VERSION
+}
+
+docker_build () {
+    show docker build -f Dockerfile $(dynamic_labels) build/docker -t "$@"
 }
 
 if [ -n "$want_image" ] ; then
-    show docker build -f Dockerfile $(dynamic_labels) build/docker -t $IMAGE
-    show docker build -f Dockerfile $(dynamic_labels) build/docker -t $IMAGE-rhel8 \
-        --build-arg BASE="registry.access.redhat.com/ubi8/ubi-micro"
+    test "$redhat_only" = "y" || docker_build $IMAGE
+    docker_build $IMAGE-rhel8 --build-arg BASE="registry.access.redhat.com/ubi8/ubi-micro"
 fi
 
 publish () {
     repo="$1"
     # replace download-name/kurrent-latest with upload-name/$repo
-    image="docker.cloudsmith.io/eventstore/$repo/${IMAGE#docker.kurrent.io/kurrent-latest/}"
+    dst="docker.cloudsmith.io/eventstore/$repo/${IMAGE#docker.kurrent.io/kurrent-latest/}"
 
     # publish standard image
-    show docker buildx build \
-        --push \
-        --provenance=false \
-        --sbom=false \
-        --platform=linux/arm64/v8,linux/amd64 \
-        $(dynamic_labels) \
-        -f Dockerfile \
-        build/docker \
-        -t $image
+    if [ "$redhat_only" != "y" ] ; then
+        show podman build \
+            --platform linux/arm64/v8,linux/amd64 \
+            --manifest $IMAGE \
+            $(dynamic_labels) \
+            -f Dockerfile \
+            build/docker
 
-    # publish redhat image
-    show docker buildx build \
-        --push \
-        --provenance=false \
-        --sbom=false \
-        --platform=linux/arm64/v8,linux/amd64 \
+        show podman manifest push $IMAGE $dst
+    fi
+
+    # publish redhat image, with --pull-always so we can rebuild vulnerabile rhel8 base images
+    show podman build \
+        --platform linux/arm64/v8,linux/amd64 \
+        --manifest $IMAGE-rhel8 \
         $(dynamic_labels) \
         -f Dockerfile \
         build/docker \
-        -t $image-rhel8 \
+        --pull=always \
         --build-arg BASE="registry.access.redhat.com/ubi8/ubi-micro"
+
+    show podman manifest push "$IMAGE-rhel8" "$dst-rhel8"
 }
 
 if [ -n "$want_publish_staging" ] ; then
