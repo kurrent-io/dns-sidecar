@@ -94,6 +94,7 @@ publish () {
     fi
 
     # publish redhat image, with --pull-always so we can rebuild vulnerabile rhel8 base images
+    podman rm $IMAGE-rhel8 2>/dev/null || true
     show podman build \
         --platform linux/arm64/v8,linux/amd64 \
         --manifest $IMAGE-rhel8 \
